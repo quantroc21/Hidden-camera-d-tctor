@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Máy soi camera ẩn — Demo (diffyjs)</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <!-- Nền chớp sáng: phát ánh sáng nhấp nháy để ống kính camera lóe theo nhịp -->
+  <div id="flash"></div>
+
+  <main id="app">
+    <header>
+      <h1>🔦 Máy soi camera · chế độ 2 máy</h1>
+      <p class="sub">Máy này chạy <b>camera sau</b>. Máy thứ 2 <b>bật đèn pin</b> kê sát ngay dưới ống kính · tắt đèn phòng · cự li 20–50cm · rê chậm</p>
+    </header>
+
+    <div id="stage">
+      <video id="video" playsinline muted></video>
+      <canvas id="overlay"></canvas>
+      <div id="hint">Bấm “Bắt đầu quét” để mở camera</div>
+    </div>
+
+    <div id="status" class="status idle">Chưa quét</div>
+
+    <div class="controls">
+      <button id="startBtn">▶️ Bắt đầu quét</button>
+      <button id="stopBtn" disabled>⏸ Dừng</button>
+    </div>
+
+    <div class="sliders">
+      <label>Độ nhạy
+        <input type="range" id="sens" min="1" max="10" value="5" />
+      </label>
+    </div>
+
+    <p class="disclaimer">
+      ⚠️ Đốm khoanh đỏ = <b>nghi</b> ống kính. Chốt bằng cách <b>rê máy</b>: còn lóe theo góc = camera;
+      trượt/tắt ngay = gương/kim loại. Có thể báo nhầm và bỏ sót — không phải cam kết an toàn tuyệt đối.
+    </p>
+    <p class="credit">Camera engine: <a href="https://github.com/maniart/diffyjs" target="_blank" rel="noreferrer">maniart/diffyjs</a></p>
+  </main>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

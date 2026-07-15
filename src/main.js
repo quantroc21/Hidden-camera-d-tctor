@@ -18,6 +18,9 @@ const statusEl = document.getElementById('status');
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const sensEl = document.getElementById('sens');
+const subEl = document.getElementById('sub');
+const modeLensBtn = document.getElementById('modeLens');
+const modeIrBtn = document.getElementById('modeIr');
 const octx = overlay.getContext('2d');
 
 const acanvas = document.createElement('canvas');
@@ -25,11 +28,18 @@ acanvas.width = AW; acanvas.height = AH;
 const actx = acanvas.getContext('2d', { willReadFrequently: true });
 
 let diffy = null, raf = null, started = false;
+let mode = 'lens';          // 'lens' (soi ống kính, cam sau) | 'ir' (soi đèn đêm, cam trước)
 
-// Ép camera sau
+// Hai chế độ dùng hướng camera khác nhau
+const SUB = {
+  lens: 'Máy này chạy <b>camera sau</b>. Máy thứ 2 <b>bật đèn pin</b> kê sát ngay dưới ống kính · tắt đèn phòng · cự li 20–50cm · rê chậm',
+  ir: 'Dùng <b>camera trước</b> · <b>tắt HẾT đèn</b>, chờ ~10s cho camera ẩn chuyển quay đêm · tìm chấm sáng tím/trắng mắt thường không thấy',
+};
+const facingFor = () => (mode === 'ir' ? 'user' : 'environment');
+
 const origGUM = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
 navigator.mediaDevices.getUserMedia = (c) => {
-  if (c && c.video && typeof c.video === 'object') c.video.facingMode = { ideal: 'environment' };
+  if (c && c.video && typeof c.video === 'object') c.video.facingMode = { ideal: facingFor() };
   return origGUM(c);
 };
 
@@ -60,11 +70,12 @@ function detect(video) {
   }
   const bg = boxBlur(lum, AW, AH, 6);   // nền cục bộ
 
-  // Đèn pin ngoài + phòng tối -> glint ống kính rất chói & sắc. Siết chặt để bớt cảnh giả.
   const sens = Number(sensEl.value);
-  const localGap = 120 - sens * 7;     // sens5 -> phải chói hơn nền ~85
-  const absFloor = 165;                // và phải đủ sáng (glint từ đèn pin thường bão hòa)
-  const hot = (i) => lum[i] >= absFloor && (lum[i] - bg[i]) >= localGap;
+  // lens: glint đèn pin rất chói -> siết chặt. ir: chấm IR có thể mờ -> nới xuống.
+  const cfg = mode === 'ir'
+    ? { absFloor: 78, localGap: 55 - sens * 3, minCells: 2, color: '210,70,255', label: 'đốm IR (nghi camera quay đêm)' }
+    : { absFloor: 165, localGap: 120 - sens * 7, minCells: 3, color: '255,40,40', label: 'nghi ống kính' };
+  const hot = (i) => lum[i] >= cfg.absFloor && (lum[i] - bg[i]) >= cfg.localGap;
 
   // gom cụm (connected component 8 hướng)
   const seen = new Uint8Array(AW * AH);
@@ -89,18 +100,18 @@ function detect(video) {
     const bw = maxX - minX + 1, bh = maxY - minY + 1;
     const fill = c / (bw * bh);                 // gọn/đặc?
     const aspect = Math.max(bw, bh) / Math.min(bw, bh);
-    const compact = fill >= 0.45 && aspect <= 2.6 && c >= 3;
+    const compact = fill >= 0.45 && aspect <= 2.6 && c >= cfg.minCells;
     const box = { minX, maxX, minY, maxY };
-    if (c <= maxLensCells && compact) lenses.push(box);   // đốm tròn gọn = ống kính
+    if (c <= maxLensCells && compact) lenses.push(box);   // đốm tròn gọn = ống kính/IR
     else if (c > maxLensCells) surfaces.push(box);        // mảng lớn = bề mặt phản chiếu
     // đốm nhỏ không gọn (viền/nhiễu) -> bỏ qua, không vẽ
   }
 
-  draw(lenses, surfaces);
-  status(lenses.length, surfaces.length, Math.round(max));
+  draw(lenses, surfaces, cfg.color);
+  status(lenses.length, Math.round(max), cfg.label);
 }
 
-function draw(lenses, surfaces) {
+function draw(lenses, surfaces, color) {
   const W = overlay.width, H = overlay.height;
   octx.clearRect(0, 0, W, H);
   const sx = W / AW, sy = H / AH;
@@ -110,7 +121,7 @@ function draw(lenses, surfaces) {
     octx.strokeRect(b.minX * sx, b.minY * sy, (b.maxX - b.minX + 1) * sx, (b.maxY - b.minY + 1) * sy);
   octx.setLineDash([]);
 
-  octx.lineWidth = 3; octx.strokeStyle = 'rgba(255,40,40,0.95)'; octx.fillStyle = 'rgba(255,40,40,0.18)';
+  octx.lineWidth = 3; octx.strokeStyle = `rgba(${color},0.95)`; octx.fillStyle = `rgba(${color},0.18)`;
   for (const b of lenses) {
     const cx = (b.minX + b.maxX + 1) / 2 * sx, cy = (b.minY + b.maxY + 1) / 2 * sy;
     const r = Math.max((b.maxX - b.minX + 1) * sx, (b.maxY - b.minY + 1) * sy, 16) * 0.7 + 10;
@@ -118,14 +129,15 @@ function draw(lenses, surfaces) {
   }
 }
 
-function status(lens, surf, max) {
+function status(count, max, label) {
   statusEl.classList.remove('idle', 'ok', 'warn');
   const dbg = ` · sáng nhất ${max}`;
-  if (lens === 0) {
-    statusEl.textContent = '✅ Chưa thấy đốm nghi ống kính' + dbg;
+  const tail = mode === 'ir' ? '' : ' — rê máy: còn lóe = camera';
+  if (count === 0) {
+    statusEl.textContent = `✅ Chưa thấy ${label}` + dbg;
     statusEl.classList.add('ok');
   } else {
-    statusEl.textContent = `🔴 ${lens} đốm nghi ống kính — rê máy: còn lóe = camera` + dbg;
+    statusEl.textContent = `🔴 ${count} ${label}${tail}` + dbg;
     statusEl.classList.add('warn');
   }
 }
@@ -138,7 +150,9 @@ function loop() {
 
 async function startScan() {
   if (started) return;
-  started = true; startBtn.disabled = true; hintEl.style.display = 'none';
+  started = true;
+  startBtn.disabled = true; modeLensBtn.disabled = true; modeIrBtn.disabled = true;
+  hintEl.style.display = 'none';
   statusEl.textContent = 'Đang mở camera…';
   try {
     diffy = create({ resolution: { x: 8, y: 6 }, sourceDimensions: { w: 320, h: 240 }, debug: false });
@@ -148,14 +162,37 @@ async function startScan() {
     try { await v.play(); } catch (_) {}
     const rect = stageEl.getBoundingClientRect();
     overlay.width = rect.width; overlay.height = rect.height;
-    flashEl.classList.remove('on');    // giữ TỐI: đèn pin máy thứ 2 lo phần chiếu sáng
+    flashEl.classList.remove('on');    // giữ TỐI
     stopBtn.disabled = false;
     loop();
+    if (mode === 'ir') await irCountdown(10);
     statusEl.textContent = 'Đang quét…';
   } catch (err) {
     statusEl.textContent = '❌ Lỗi camera: ' + err.message;
     started = false; startBtn.disabled = false;
   }
+}
+
+// Đếm ngược để camera ẩn kịp chuyển sang quay đêm (bật IR)
+function irCountdown(sec) {
+  hintEl.style.display = 'flex';
+  return new Promise((resolve) => {
+    let t = sec;
+    const tick = () => {
+      hintEl.textContent = `🌙 Tắt HẾT đèn — chờ camera chuyển quay đêm: ${t}s`;
+      if (t-- <= 0) { hintEl.style.display = 'none'; resolve(); return; }
+      setTimeout(tick, 1000);
+    };
+    tick();
+  });
+}
+
+function selectMode(m) {
+  if (started) return;
+  mode = m;
+  modeLensBtn.classList.toggle('active', m === 'lens');
+  modeIrBtn.classList.toggle('active', m === 'ir');
+  subEl.innerHTML = SUB[m];
 }
 
 function stopScan() {
@@ -169,6 +206,8 @@ function stopScan() {
 
 startBtn.addEventListener('click', startScan);
 stopBtn.addEventListener('click', stopScan);
+modeLensBtn.addEventListener('click', () => selectMode('lens'));
+modeIrBtn.addEventListener('click', () => selectMode('ir'));
 window.addEventListener('resize', () => {
   if (!started) return;
   const rect = stageEl.getBoundingClientRect();

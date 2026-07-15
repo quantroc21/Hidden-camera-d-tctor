@@ -48,6 +48,29 @@ header h1 { margin: 4px 0; font-size: 22px; }
 .sub { margin: 0; font-size: 13px; color: var(--muted); }
 .sub b { color: var(--text); }
 
+.modes {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.mode {
+  flex: 1;
+  padding: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.05);
+  color: var(--muted);
+  cursor: pointer;
+}
+.mode.active {
+  background: #2b6cff;
+  color: #fff;
+  border-color: #2b6cff;
+}
+.mode:disabled { opacity: 0.5; cursor: default; }
+
 #stage {
   position: relative;
   width: 100%;

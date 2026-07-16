@@ -34,7 +34,7 @@ let tracks = [];
 
 // Cả 2 mode dùng CAMERA TRƯỚC (máy 1). Máy 2 = đèn pin sáng, ép sát camera.
 const SUB = {
-  lens: 'Máy 1 <b>camera trước</b> · máy 2 <b>đèn pin sáng ép sát cạnh camera</b> · tắt đèn phòng · <b>RÊ THẬT CHẬM</b> quanh vật — đốm nào sáng bám theo góc = ống kính (khoanh đỏ)',
+  lens: 'Máy 1 <b>camera trước</b> · máy 2 <b>đèn sáng ép sát cạnh camera</b> · <b>NGHIÊNG / rê CHẬM</b> quanh vật — đốm nhỏ <b>ánh tím/xanh đổi màu</b> (lớp phủ ống kính) = camera (khoanh đỏ)',
   ir: 'Dùng <b>camera trước</b> · <b>tắt HẾT đèn</b>, chờ ~10s cho camera ẩn chuyển quay đêm · tìm chấm sáng tím/trắng mắt thường không thấy',
 };
 const facingFor = () => 'environment';
@@ -88,23 +88,41 @@ function detect(video) {
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
+// Hue (độ) từ RGB — để bắt ánh tím/xanh của lớp phủ AR ống kính
+function rgbHue(r, g, b) {
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), dd = mx - mn;
+  if (dd < 1e-6) return 0;
+  let h;
+  if (mx === r) h = ((g - b) / dd) % 6;
+  else if (mx === g) h = (b - r) / dd + 2;
+  else h = (r - g) / dd + 4;
+  h *= 60; if (h < 0) h += 360;
+  return h;
+}
+// Độ "lấp lánh đổi màu" của một track = phương sai hue theo thời gian (giao thoa AR coating)
+function hueVar(t) {
+  if (t.n < 4) return 0;
+  const R = Math.sqrt(t.sHueSin * t.sHueSin + t.sHueCos * t.sHueCos) / t.n;
+  return clamp01((1 - R) / 0.4);   // hue trải rộng -> shimmer cao
+}
+
 // Điểm bằng chứng: gộp NHIỀU dấu hiệu của ống kính -> chỉ khoanh khi đủ điểm.
 // Chấm điểm dựa trên tài liệu về "cat's eye"/lens-sensor retroreflection:
 //  - phản xạ sáng gấp 2–4 bậc & BÃO HÒA sensor (LAPD, Optica) -> lõi bão hòa là dấu hiệu mạnh nhất
 //  - chỉ hiện trong cửa sổ góc hẹp (LAPD FoV filter) -> bám vài khung khi rê, không cần dài
+// Bằng chứng dựa trên đặc trưng lớp phủ AR: đốm nhỏ, có MÀU, và màu ĐỔI khi nghiêng
+// (giao thoa nhiều lớp) -> khác LED (màu đứng yên) và bề mặt trắng phẳng.
 function evidence(t) {
   const n = t.n;
   const cMean = t.sC / n;
-  const cVar = Math.max(0, t.sC2 / n - cMean * cMean), cStd = Math.sqrt(cVar);
-  const fillM = t.sFill / n, aspM = t.sAsp / n, satM = t.sSat / n, szM = t.sSz / n, clipM = t.sClip / n;
-  const satCore = clamp01(clipM / 0.22);                      // lõi bão hòa (near-clip) — đặc trưng nhất
-  const strong  = clamp01((cMean - 45) / 110);               // chói vượt trội so với nền
-  const persist = clamp01((t.age - 2) / 8);                  // bám trong cửa sổ góc hẹp khi rê
-  const steady  = clamp01(1 - (cMean > 5 ? cStd / cMean : 1)); // sáng ổn định, không chớp loạn
-  const round   = clamp01((fillM - 0.4) / 0.55) * clamp01((2.6 - aspM) / 1.6); // tròn & đặc
-  const neutral = clamp01((0.34 - satM) / 0.34);             // trắng (không phải LED màu)
-  const small   = clamp01((26 - szM) / 22);                  // đốm nhỏ
-  return 0.22 * satCore + 0.20 * persist + 0.16 * strong + 0.14 * steady + 0.12 * round + 0.08 * neutral + 0.08 * small;
+  const fillM = t.sFill / n, aspM = t.sAsp / n, satM = t.sSat / n, szM = t.sSz / n;
+  const persist  = clamp01((t.age - 2) / 8);                 // bám khi rê
+  const shimmer  = hueVar(t);                                // màu đổi (AR coating) — đặc trưng nhất
+  const colorful = clamp01((satM - 0.12) / 0.4);             // có màu (không xám/trắng phẳng)
+  const strong   = clamp01((cMean - 40) / 110);              // đủ chói hơn nền
+  const round    = clamp01((fillM - 0.4) / 0.55) * clamp01((2.6 - aspM) / 1.6);
+  const small    = clamp01((22 - szM) / 18);                 // đốm nhỏ (ống kính ẩn)
+  return 0.24 * persist + 0.22 * shimmer + 0.16 * colorful + 0.14 * small + 0.12 * round + 0.12 * strong;
 }
 
 // Phát hiện ống kính: gom đốm -> đo nhiều đặc trưng -> nối track -> chấm điểm bằng chứng
@@ -140,20 +158,23 @@ function detectLensSweep(d, lum, sens) {
     const box = { minX, maxX, minY, maxY };
     // Chỉ nhận đốm NHỎ & gọn (ống kính ẩn nhỏ). Đốm to (chữ/icon/vật sáng) -> loại.
     if (c > MAX_LENS_CELLS || c < 3) continue;
-    if (fill >= 0.5 && aspect <= 2.3 && sat < 0.5) {
-      cands.push({ cx: (minX + maxX + 1) / 2, cy: (minY + maxY + 1) / 2, box, fill, aspect, sat, contrast, size: c, clip: nClip / c });
+    if (fill >= 0.5 && aspect <= 2.3) {   // nhận cả đốm CÓ MÀU (ánh AR của ống kính)
+      const hueRad = rgbHue(sR, sG, sB) * Math.PI / 180;
+      cands.push({ cx: (minX + maxX + 1) / 2, cy: (minY + maxY + 1) / 2, box, fill, aspect, sat, contrast, size: c, hueRad });
     }
   }
 
   matchTracks(cands);
-  const CONF = clamp01(0.72 - sens * 0.03);   // ngưỡng điểm để khoanh đỏ (sens5 -> 0.57)
+  const CONF = clamp01(0.60 - sens * 0.03);   // ngưỡng điểm (sens5 -> 0.45)
   const confirmed = [];
   let pendingCount = 0;
   for (const t of tracks) {
     if (t.miss > 0) continue;
     const s = evidence(t);
-    if (s >= CONF && t.age >= 4) confirmed.push(t.box);
-    else if (s >= CONF - 0.12) pendingCount++;   // gần đủ điểm nhưng CHƯA vẽ
+    const satM = t.sSat / t.n;
+    // phải: đủ điểm + bám lâu + CÓ MÀU + màu ĐỔI (shimmer) -> loại LED (màu đứng yên) & đốm trắng
+    if (s >= CONF && t.age >= 5 && satM >= 0.15 && hueVar(t) >= 0.15) confirmed.push(t.box);
+    else if (s >= CONF - 0.12) pendingCount++;
   }
   drawSweep(confirmed);   // CHỈ vẽ chấm đỏ đã đủ bằng chứng
 
@@ -185,13 +206,15 @@ function matchTracks(cands) {
       const t = tracks[best]; used[best] = true;
       t.x = (t.x + cd.cx) / 2; t.y = (t.y + cd.cy) / 2;
       t.age++; t.miss = 0; t.box = cd.box;
-      t.n++; t.sC += cd.contrast; t.sC2 += cd.contrast * cd.contrast;
-      t.sFill += cd.fill; t.sAsp += cd.aspect; t.sSat += cd.sat; t.sSz += cd.size; t.sClip += cd.clip;
+      t.n++; t.sC += cd.contrast;
+      t.sFill += cd.fill; t.sAsp += cd.aspect; t.sSat += cd.sat; t.sSz += cd.size;
+      t.sHueSin += Math.sin(cd.hueRad); t.sHueCos += Math.cos(cd.hueRad);
     } else {
       tracks.push({
         x: cd.cx, y: cd.cy, age: 1, miss: 0, box: cd.box,
-        n: 1, sC: cd.contrast, sC2: cd.contrast * cd.contrast,
-        sFill: cd.fill, sAsp: cd.aspect, sSat: cd.sat, sSz: cd.size, sClip: cd.clip,
+        n: 1, sC: cd.contrast,
+        sFill: cd.fill, sAsp: cd.aspect, sSat: cd.sat, sSz: cd.size,
+        sHueSin: Math.sin(cd.hueRad), sHueCos: Math.cos(cd.hueRad),
       });
     }
   }

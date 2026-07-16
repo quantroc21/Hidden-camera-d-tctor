@@ -79,15 +79,16 @@ function detect(video) {
 
   // gom cụm (connected component 8 hướng)
   const seen = new Uint8Array(AW * AH);
-  const lenses = [], surfaces = [];
+  const lenses = [], leds = [], surfaces = [];   // ống kính | LED màu | bề mặt lớn
   const maxLensCells = AW * AH * SURFACE_RATIO;
   for (let y = 0; y < AH; y++) for (let x = 0; x < AW; x++) {
     const i0 = y * AW + x;
     if (seen[i0] || !hot(i0)) continue;
     const st = [i0]; seen[i0] = 1;
-    let c = 0, minX = x, maxX = x, minY = y, maxY = y;
+    let c = 0, minX = x, maxX = x, minY = y, maxY = y, sR = 0, sG = 0, sB = 0;
     while (st.length) {
       const i = st.pop(), cx = i % AW, cy = (i - cx) / AW; c++;
+      const p = i * 4; sR += d[p]; sG += d[p + 1]; sB += d[p + 2];
       if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
       if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
@@ -98,20 +99,33 @@ function detect(video) {
       }
     }
     const bw = maxX - minX + 1, bh = maxY - minY + 1;
-    const fill = c / (bw * bh);                 // gọn/đặc?
+    const fill = c / (bw * bh);
     const aspect = Math.max(bw, bh) / Math.min(bw, bh);
     const compact = fill >= 0.45 && aspect <= 2.6 && c >= cfg.minCells;
+    // độ bão hòa màu trung bình của cụm
+    const mx = Math.max(sR, sG, sB), mn = Math.min(sR, sG, sB);
+    const sat = mx > 0 ? (mx - mn) / mx : 0;
     const box = { minX, maxX, minY, maxY };
-    if (c <= maxLensCells && compact) lenses.push(box);   // đốm tròn gọn = ống kính/IR
-    else if (c > maxLensCells) surfaces.push(box);        // mảng lớn = bề mặt phản chiếu
-    // đốm nhỏ không gọn (viền/nhiễu) -> bỏ qua, không vẽ
+
+    if (c > maxLensCells) surfaces.push(box);              // mảng lớn = bề mặt phản chiếu
+    else if (compact) {
+      // mode ống kính: đốm màu bão hòa -> nghi LED thiết bị (TV/máy lạnh), không phải phản xạ trắng
+      if (mode === 'lens' && sat >= 0.34) leds.push(box);
+      else lenses.push(box);
+    }
   }
 
-  draw(lenses, surfaces, cfg.color);
-  status(lenses.length, Math.round(max), cfg.label);
+  draw(lenses, leds, surfaces, cfg.color);
+  status(lenses.length, leds.length, Math.round(max), cfg.label);
 }
 
-function draw(lenses, surfaces, color) {
+function circle(b, sx, sy) {
+  const cx = (b.minX + b.maxX + 1) / 2 * sx, cy = (b.minY + b.maxY + 1) / 2 * sy;
+  const r = Math.max((b.maxX - b.minX + 1) * sx, (b.maxY - b.minY + 1) * sy, 16) * 0.7 + 10;
+  octx.beginPath(); octx.arc(cx, cy, r, 0, 6.2832); octx.fill(); octx.stroke();
+}
+
+function draw(lenses, leds, surfaces, color) {
   const W = overlay.width, H = overlay.height;
   octx.clearRect(0, 0, W, H);
   const sx = W / AW, sy = H / AH;
@@ -121,24 +135,28 @@ function draw(lenses, surfaces, color) {
     octx.strokeRect(b.minX * sx, b.minY * sy, (b.maxX - b.minX + 1) * sx, (b.maxY - b.minY + 1) * sy);
   octx.setLineDash([]);
 
-  octx.lineWidth = 3; octx.strokeStyle = `rgba(${color},0.95)`; octx.fillStyle = `rgba(${color},0.18)`;
-  for (const b of lenses) {
-    const cx = (b.minX + b.maxX + 1) / 2 * sx, cy = (b.minY + b.maxY + 1) / 2 * sy;
-    const r = Math.max((b.maxX - b.minX + 1) * sx, (b.maxY - b.minY + 1) * sy, 16) * 0.7 + 10;
-    octx.beginPath(); octx.arc(cx, cy, r, 0, 6.2832); octx.fill(); octx.stroke();
-  }
+  // LED thiết bị (đốm màu) = vàng
+  octx.lineWidth = 3; octx.strokeStyle = 'rgba(255,190,40,0.95)'; octx.fillStyle = 'rgba(255,190,40,0.15)';
+  for (const b of leds) circle(b, sx, sy);
+
+  // nghi ống kính / IR = màu chính của mode
+  octx.strokeStyle = `rgba(${color},0.95)`; octx.fillStyle = `rgba(${color},0.18)`;
+  for (const b of lenses) circle(b, sx, sy);
 }
 
-function status(count, max, label) {
+function status(lens, led, max, label) {
   statusEl.classList.remove('idle', 'ok', 'warn');
   const dbg = ` · sáng nhất ${max}`;
   const tail = mode === 'ir' ? '' : ' — rê máy: còn lóe = camera';
-  if (count === 0) {
-    statusEl.textContent = `✅ Chưa thấy ${label}` + dbg;
+  if (lens > 0) {
+    statusEl.textContent = `🔴 ${lens} ${label}${tail}` + dbg;
+    statusEl.classList.add('warn');
+  } else if (led > 0) {
+    statusEl.textContent = `🟡 Chỉ thấy ${led} đốm màu (nghi LED thiết bị: TV/máy lạnh)` + dbg;
     statusEl.classList.add('ok');
   } else {
-    statusEl.textContent = `🔴 ${count} ${label}${tail}` + dbg;
-    statusEl.classList.add('warn');
+    statusEl.textContent = `✅ Chưa thấy ${label}` + dbg;
+    statusEl.classList.add('ok');
   }
 }
 

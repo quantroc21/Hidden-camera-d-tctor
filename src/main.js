@@ -9,6 +9,7 @@ import { create } from 'diffyjs';
 
 const AW = 96, AH = 72;              // lưới phân tích (nhỏ cho nhanh)
 const SURFACE_RATIO = 0.05;          // cụm > 5% khung => bề mặt phản chiếu lớn -> loại
+const MAX_LENS_CELLS = 22;           // ống kính ẩn NHỎ: đốm lớn hơn (chữ/icon/vật sáng) -> loại
 
 const flashEl = document.getElementById('flash');
 const stageEl = document.getElementById('stage');
@@ -113,8 +114,7 @@ function detectLensSweep(d, lum, sens) {
   const hot = (i) => lum[i] >= absFloor && (lum[i] - bg[i]) >= localGap;
 
   const seen = new Uint8Array(AW * AH);
-  const cands = [], leds = [], surfaces = [];
-  const maxLensCells = AW * AH * SURFACE_RATIO;
+  const cands = [];
   for (let y = 0; y < AH; y++) for (let x = 0; x < AW; x++) {
     const i0 = y * AW + x;
     if (seen[i0] || !hot(i0)) continue;
@@ -138,34 +138,34 @@ function detectLensSweep(d, lum, sens) {
     const mx = Math.max(sR, sG, sB), mn = Math.min(sR, sG, sB), sat = mx > 0 ? (mx - mn) / mx : 0;
     const contrast = sL / c - sBg / c;
     const box = { minX, maxX, minY, maxY };
-    if (c > maxLensCells) surfaces.push(box);
-    else if (fill >= 0.45 && aspect <= 2.6 && c >= 3) {
-      if (sat >= 0.5) leds.push(box);       // màu đậm -> chắc chắn LED thiết bị
-      else cands.push({ cx: (minX + maxX + 1) / 2, cy: (minY + maxY + 1) / 2, box, fill, aspect, sat, contrast, size: c, clip: nClip / c });
+    // Chỉ nhận đốm NHỎ & gọn (ống kính ẩn nhỏ). Đốm to (chữ/icon/vật sáng) -> loại.
+    if (c > MAX_LENS_CELLS || c < 3) continue;
+    if (fill >= 0.5 && aspect <= 2.3 && sat < 0.5) {
+      cands.push({ cx: (minX + maxX + 1) / 2, cy: (minY + maxY + 1) / 2, box, fill, aspect, sat, contrast, size: c, clip: nClip / c });
     }
   }
 
   matchTracks(cands);
   const CONF = clamp01(0.72 - sens * 0.03);   // ngưỡng điểm để khoanh đỏ (sens5 -> 0.57)
-  const confirmed = [], pending = [];
+  const confirmed = [];
+  let pendingCount = 0;
   for (const t of tracks) {
     if (t.miss > 0) continue;
     const s = evidence(t);
     if (s >= CONF && t.age >= 4) confirmed.push(t.box);
-    else if (s >= CONF - 0.18) pending.push(t.box);   // gần đủ điểm -> đang xác minh
-    // điểm thấp -> KHÔNG vẽ (tránh phun chấm loạn)
+    else if (s >= CONF - 0.12) pendingCount++;   // gần đủ điểm nhưng CHƯA vẽ
   }
-  drawSweep(confirmed, pending, leds, surfaces);
+  drawSweep(confirmed);   // CHỈ vẽ chấm đỏ đã đủ bằng chứng
 
   statusEl.classList.remove('idle', 'ok', 'warn');
   if (confirmed.length > 0) {
-    statusEl.textContent = `🔴 ${confirmed.length} đốm ĐỦ BẰNG CHỨNG ống kính (rê tiếp cho chắc)`;
+    statusEl.textContent = `🔴 ${confirmed.length} đốm ĐỦ BẰNG CHỨNG ống kính`;
     statusEl.classList.add('warn');
-  } else if (pending.length > 0) {
-    statusEl.textContent = `⏳ Đang gom bằng chứng ${pending.length} đốm — RÊ CHẬM quanh vật`;
+  } else if (pendingCount > 0) {
+    statusEl.textContent = '⏳ Đang gom bằng chứng — RÊ CHẬM quanh vật';
     statusEl.classList.add('idle');
   } else {
-    statusEl.textContent = '✅ Chưa đủ bằng chứng ống kính' + (leds.length ? ` (bỏ ${leds.length} LED màu)` : '');
+    statusEl.textContent = '✅ Chưa thấy ống kính';
     statusEl.classList.add('ok');
   }
 }
@@ -199,23 +199,12 @@ function matchTracks(cands) {
   tracks = tracks.filter((t) => t.miss <= 3);
 }
 
-function drawSweep(confirmed, pending, leds, surfaces) {
+function drawSweep(confirmed) {
   const W = overlay.width, H = overlay.height;
   octx.clearRect(0, 0, W, H);
   const sx = W / AW, sy = H / AH;
-  // bề mặt lớn (gương/kính) - xám
-  octx.lineWidth = 2; octx.strokeStyle = 'rgba(150,160,175,0.5)'; octx.setLineDash([6, 5]);
-  for (const b of surfaces) octx.strokeRect(b.minX * sx, b.minY * sy, (b.maxX - b.minX + 1) * sx, (b.maxY - b.minY + 1) * sy);
-  octx.setLineDash([]);
-  // LED màu thiết bị - vàng
-  octx.lineWidth = 3; octx.strokeStyle = 'rgba(255,190,40,0.9)'; octx.fillStyle = 'rgba(255,190,40,0.12)';
-  for (const b of leds) circle(b, sx, sy);
-  // đốm đang xác minh - trắng mờ nét đứt
-  octx.strokeStyle = 'rgba(230,230,230,0.7)'; octx.fillStyle = 'rgba(230,230,230,0.06)'; octx.setLineDash([4, 4]);
-  for (const b of pending) circle(b, sx, sy);
-  octx.setLineDash([]);
-  // xác nhận bám góc - đỏ
-  octx.strokeStyle = 'rgba(255,40,40,0.97)'; octx.fillStyle = 'rgba(255,40,40,0.18)';
+  // CHỈ vẽ chấm đỏ đã đủ bằng chứng
+  octx.lineWidth = 3; octx.strokeStyle = 'rgba(255,40,40,0.97)'; octx.fillStyle = 'rgba(255,40,40,0.20)';
   for (const b of confirmed) circle(b, sx, sy);
 }
 
@@ -256,7 +245,7 @@ function clusterDrawStatus(hot, d, maxVal, cfg, useColor) {
 
 function circle(b, sx, sy) {
   const cx = (b.minX + b.maxX + 1) / 2 * sx, cy = (b.minY + b.maxY + 1) / 2 * sy;
-  const r = Math.max((b.maxX - b.minX + 1) * sx, (b.maxY - b.minY + 1) * sy, 16) * 0.7 + 10;
+  const r = Math.max((b.maxX - b.minX + 1) * sx, (b.maxY - b.minY + 1) * sy) * 0.6 + 4;   // vòng nhỏ sát đốm
   octx.beginPath(); octx.arc(cx, cy, r, 0, 6.2832); octx.fill(); octx.stroke();
 }
 

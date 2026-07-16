@@ -88,18 +88,22 @@ function detect(video) {
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
 // Điểm bằng chứng: gộp NHIỀU dấu hiệu của ống kính -> chỉ khoanh khi đủ điểm.
+// Chấm điểm dựa trên tài liệu về "cat's eye"/lens-sensor retroreflection:
+//  - phản xạ sáng gấp 2–4 bậc & BÃO HÒA sensor (LAPD, Optica) -> lõi bão hòa là dấu hiệu mạnh nhất
+//  - chỉ hiện trong cửa sổ góc hẹp (LAPD FoV filter) -> bám vài khung khi rê, không cần dài
 function evidence(t) {
   const n = t.n;
   const cMean = t.sC / n;
   const cVar = Math.max(0, t.sC2 / n - cMean * cMean), cStd = Math.sqrt(cVar);
-  const fillM = t.sFill / n, aspM = t.sAsp / n, satM = t.sSat / n, szM = t.sSz / n;
-  const persist = clamp01((t.age - 2) / 8);                 // bám góc lâu khi rê
-  const round = clamp01((fillM - 0.4) / 0.55) * clamp01((2.6 - aspM) / 1.6); // tròn & đặc
-  const neutral = clamp01((0.34 - satM) / 0.34);            // trắng/trung tính (không phải LED màu)
-  const steady = clamp01(1 - (cMean > 5 ? cStd / cMean : 1)); // độ sáng ổn định (retro), không chớp loạn
-  const strong = clamp01((cMean - 35) / 90);                // đủ chói hơn nền
-  const small = clamp01((26 - szM) / 22);                   // đốm nhỏ (ống kính), không to
-  return 0.28 * persist + 0.18 * round + 0.14 * neutral + 0.18 * steady + 0.12 * strong + 0.10 * small;
+  const fillM = t.sFill / n, aspM = t.sAsp / n, satM = t.sSat / n, szM = t.sSz / n, clipM = t.sClip / n;
+  const satCore = clamp01(clipM / 0.22);                      // lõi bão hòa (near-clip) — đặc trưng nhất
+  const strong  = clamp01((cMean - 45) / 110);               // chói vượt trội so với nền
+  const persist = clamp01((t.age - 2) / 8);                  // bám trong cửa sổ góc hẹp khi rê
+  const steady  = clamp01(1 - (cMean > 5 ? cStd / cMean : 1)); // sáng ổn định, không chớp loạn
+  const round   = clamp01((fillM - 0.4) / 0.55) * clamp01((2.6 - aspM) / 1.6); // tròn & đặc
+  const neutral = clamp01((0.34 - satM) / 0.34);             // trắng (không phải LED màu)
+  const small   = clamp01((26 - szM) / 22);                  // đốm nhỏ
+  return 0.22 * satCore + 0.20 * persist + 0.16 * strong + 0.14 * steady + 0.12 * round + 0.08 * neutral + 0.08 * small;
 }
 
 // Phát hiện ống kính: gom đốm -> đo nhiều đặc trưng -> nối track -> chấm điểm bằng chứng
@@ -115,10 +119,11 @@ function detectLensSweep(d, lum, sens) {
     const i0 = y * AW + x;
     if (seen[i0] || !hot(i0)) continue;
     const st = [i0]; seen[i0] = 1;
-    let c = 0, minX = x, maxX = x, minY = y, maxY = y, sR = 0, sG = 0, sB = 0, sL = 0, sBg = 0;
+    let c = 0, minX = x, maxX = x, minY = y, maxY = y, sR = 0, sG = 0, sB = 0, sL = 0, sBg = 0, nClip = 0;
     while (st.length) {
       const i = st.pop(), cx = i % AW, cy = (i - cx) / AW; c++;
       const p = i * 4; sR += d[p]; sG += d[p + 1]; sB += d[p + 2]; sL += lum[i]; sBg += bg[i];
+      if (lum[i] >= 240) nClip++;   // đếm pixel gần bão hòa (lõi cat's eye)
       if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
       if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
@@ -136,7 +141,7 @@ function detectLensSweep(d, lum, sens) {
     if (c > maxLensCells) surfaces.push(box);
     else if (fill >= 0.45 && aspect <= 2.6 && c >= 3) {
       if (sat >= 0.5) leds.push(box);       // màu đậm -> chắc chắn LED thiết bị
-      else cands.push({ cx: (minX + maxX + 1) / 2, cy: (minY + maxY + 1) / 2, box, fill, aspect, sat, contrast, size: c });
+      else cands.push({ cx: (minX + maxX + 1) / 2, cy: (minY + maxY + 1) / 2, box, fill, aspect, sat, contrast, size: c, clip: nClip / c });
     }
   }
 
@@ -181,12 +186,12 @@ function matchTracks(cands) {
       t.x = (t.x + cd.cx) / 2; t.y = (t.y + cd.cy) / 2;
       t.age++; t.miss = 0; t.box = cd.box;
       t.n++; t.sC += cd.contrast; t.sC2 += cd.contrast * cd.contrast;
-      t.sFill += cd.fill; t.sAsp += cd.aspect; t.sSat += cd.sat; t.sSz += cd.size;
+      t.sFill += cd.fill; t.sAsp += cd.aspect; t.sSat += cd.sat; t.sSz += cd.size; t.sClip += cd.clip;
     } else {
       tracks.push({
         x: cd.cx, y: cd.cy, age: 1, miss: 0, box: cd.box,
         n: 1, sC: cd.contrast, sC2: cd.contrast * cd.contrast,
-        sFill: cd.fill, sAsp: cd.aspect, sSat: cd.sat, sSz: cd.size,
+        sFill: cd.fill, sAsp: cd.aspect, sSat: cd.sat, sSz: cd.size, sClip: cd.clip,
       });
     }
   }

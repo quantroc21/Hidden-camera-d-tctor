@@ -29,27 +29,14 @@ const actx = acanvas.getContext('2d', { willReadFrequently: true });
 
 let diffy = null, raf = null, started = false;
 let mode = 'lens';          // 'lens' (soi ống kính) | 'ir' (soi đèn đêm)
-let strobeTimer = null, strobeOn = false, strobeAt = 0, lastOn = null, lastOff = null;
+let tracks = [];
 
-// Cả 2 mode dùng CAMERA TRƯỚC: màn hình chớp đồng trục với camera + đèn pin máy 2.
+// Cả 2 mode dùng CAMERA TRƯỚC (máy 1). Máy 2 = đèn pin sáng, ép sát camera.
 const SUB = {
-  lens: 'Dùng <b>camera trước</b> · tắt đèn phòng, bật <b>đèn pin máy 2</b> kê cạnh camera · màn hình tự chớp — chỉ đốm <b>nhấp nháy theo</b> mới là ống kính · giữ máy YÊN',
+  lens: 'Máy 1 <b>camera trước</b> · máy 2 <b>đèn pin sáng ép sát cạnh camera</b> · tắt đèn phòng · <b>RÊ THẬT CHẬM</b> quanh vật — đốm nào sáng bám theo góc = ống kính (khoanh đỏ)',
   ir: 'Dùng <b>camera trước</b> · <b>tắt HẾT đèn</b>, chờ ~10s cho camera ẩn chuyển quay đêm · tìm chấm sáng tím/trắng mắt thường không thấy',
 };
 const facingFor = () => 'user';
-
-function startStrobe() {
-  stopStrobe();
-  strobeTimer = setInterval(() => {
-    strobeOn = !strobeOn; strobeAt = performance.now();
-    flashEl.classList.toggle('on', strobeOn);
-  }, 150);   // ~3.3Hz
-}
-function stopStrobe() {
-  if (strobeTimer) clearInterval(strobeTimer);
-  strobeTimer = null; strobeOn = false; lastOn = null; lastOff = null;
-  flashEl.classList.remove('on');
-}
 
 const origGUM = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
 navigator.mediaDevices.getUserMedia = (c) => {
@@ -92,26 +79,113 @@ function detect(video) {
     return;
   }
 
-  // LENS: temporal differencing theo nhịp chớp màn hình.
-  // Chỉ đốm PHẢN XẠ mới nhấp nháy theo strobe -> lộ ra. LED/TV tự sáng đều -> tự loại.
-  const stable = performance.now() - strobeAt > 70;   // bỏ khung ngay sau khi đổi pha
-  if (stable) { if (strobeOn) lastOn = lum; else lastOff = lum; }
-  if (!lastOn || !lastOff) {
-    statusEl.className = 'status idle';
-    statusEl.textContent = 'Đang lấy nền — giữ máy YÊN…';
-    return;
+  // LENS: đèn sáng đứng yên + BÁM GÓC (phép #2 retroreflection).
+  // Rê máy chậm: đốm PHẢN XẠ NGƯỢC (ống kính) giữ sáng liên tục -> "track" già đi -> xác nhận.
+  // Gương/kim loại chỉ lóe 1 góc rồi tắt -> track chết yểu -> loại. LED màu -> lọc màu riêng.
+  detectLensSweep(d, lum, sens);
+}
+
+// Phát hiện ống kính bằng độ bám góc khi rê máy
+function detectLensSweep(d, lum, sens) {
+  const bg = boxBlur(lum, AW, AH, 6);
+  const absFloor = 150, localGap = 110 - sens * 7;
+  const hot = (i) => lum[i] >= absFloor && (lum[i] - bg[i]) >= localGap;
+
+  const seen = new Uint8Array(AW * AH);
+  const cands = [], leds = [], surfaces = [];
+  const maxLensCells = AW * AH * SURFACE_RATIO;
+  for (let y = 0; y < AH; y++) for (let x = 0; x < AW; x++) {
+    const i0 = y * AW + x;
+    if (seen[i0] || !hot(i0)) continue;
+    const st = [i0]; seen[i0] = 1;
+    let c = 0, minX = x, maxX = x, minY = y, maxY = y, sR = 0, sG = 0, sB = 0;
+    while (st.length) {
+      const i = st.pop(), cx = i % AW, cy = (i - cx) / AW; c++;
+      const p = i * 4; sR += d[p]; sG += d[p + 1]; sB += d[p + 2];
+      if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
+      if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || nx >= AW || ny < 0 || ny >= AH) continue;
+        const ni = ny * AW + nx;
+        if (!seen[ni] && hot(ni)) { seen[ni] = 1; st.push(ni); }
+      }
+    }
+    const bw = maxX - minX + 1, bh = maxY - minY + 1;
+    const fill = c / (bw * bh), aspect = Math.max(bw, bh) / Math.min(bw, bh);
+    const compact = fill >= 0.45 && aspect <= 2.6 && c >= 3;
+    const mx = Math.max(sR, sG, sB), mn = Math.min(sR, sG, sB), sat = mx > 0 ? (mx - mn) / mx : 0;
+    const box = { minX, maxX, minY, maxY };
+    if (c > maxLensCells) surfaces.push(box);
+    else if (compact) {
+      if (sat >= 0.34) leds.push(box);                                   // LED màu -> thiết bị
+      else cands.push({ cx: (minX + maxX + 1) / 2, cy: (minY + maxY + 1) / 2, box });
+    }
   }
-  const sig = new Float32Array(AW * AH);   // biên độ nhấp nháy = ON - OFF
-  let smax = 0;
-  for (let i = 0; i < sig.length; i++) {
-    const v = lastOn[i] - lastOff[i];
-    sig[i] = v > 0 ? v : 0;
-    if (sig[i] > smax) smax = sig[i];
+
+  matchTracks(cands);                     // nối đốm qua các khung để đo độ bám
+  const CONFIRM = 6;                       // sống >= 6 khung khi rê = bám góc = ống kính
+  const confirmed = [], pending = [];
+  for (const t of tracks) {
+    if (t.miss > 0) continue;              // chỉ vẽ đốm đang hiện
+    (t.age >= CONFIRM ? confirmed : pending).push(t.box);
   }
-  const modThresh = 70 - sens * 5;   // biên độ nhấp nháy tối thiểu (sens5 -> 45)
-  const cfg = { minCells: 3, color: '255,40,40', label: 'nghi ống kính (nhấp nháy theo đèn)' };
-  const hot = (i) => sig[i] >= modThresh && lastOn[i] >= 110;
-  clusterDrawStatus(hot, d, Math.round(smax), cfg, false);
+  drawSweep(confirmed, pending, leds, surfaces);
+
+  statusEl.classList.remove('idle', 'ok', 'warn');
+  if (confirmed.length > 0) {
+    statusEl.textContent = `🔴 ${confirmed.length} đốm BÁM GÓC — nghi ống kính camera (rê tiếp để chắc)`;
+    statusEl.classList.add('warn');
+  } else if (pending.length > 0) {
+    statusEl.textContent = `⏳ Đang xác minh ${pending.length} đốm — RÊ CHẬM để lọc gương/kim loại`;
+    statusEl.classList.add('idle');
+  } else {
+    statusEl.textContent = '✅ Chưa thấy đốm bám góc' + (leds.length ? ` (bỏ ${leds.length} LED màu)` : '');
+    statusEl.classList.add('ok');
+  }
+}
+
+// Bộ nối đốm đơn giản (theo khoảng cách) để đo tuổi thọ mỗi đốm khi rê máy
+function matchTracks(cands) {
+  const R2 = 11 * 11;
+  const used = new Array(tracks.length).fill(false);
+  for (const cd of cands) {
+    let best = -1, bestD = R2;
+    for (let k = 0; k < tracks.length; k++) {
+      if (used[k]) continue;
+      const dx = tracks[k].x - cd.cx, dy = tracks[k].y - cd.cy, dd = dx * dx + dy * dy;
+      if (dd < bestD) { bestD = dd; best = k; }
+    }
+    if (best >= 0) {
+      const t = tracks[best]; used[best] = true;
+      t.x = (t.x + cd.cx) / 2; t.y = (t.y + cd.cy) / 2;
+      t.age++; t.miss = 0; t.box = cd.box;
+    } else {
+      tracks.push({ x: cd.cx, y: cd.cy, age: 1, miss: 0, box: cd.box });
+    }
+  }
+  for (let k = 0; k < tracks.length; k++) if (!used[k]) tracks[k].miss++;
+  tracks = tracks.filter((t) => t.miss <= 3);
+}
+
+function drawSweep(confirmed, pending, leds, surfaces) {
+  const W = overlay.width, H = overlay.height;
+  octx.clearRect(0, 0, W, H);
+  const sx = W / AW, sy = H / AH;
+  // bề mặt lớn (gương/kính) - xám
+  octx.lineWidth = 2; octx.strokeStyle = 'rgba(150,160,175,0.5)'; octx.setLineDash([6, 5]);
+  for (const b of surfaces) octx.strokeRect(b.minX * sx, b.minY * sy, (b.maxX - b.minX + 1) * sx, (b.maxY - b.minY + 1) * sy);
+  octx.setLineDash([]);
+  // LED màu thiết bị - vàng
+  octx.lineWidth = 3; octx.strokeStyle = 'rgba(255,190,40,0.9)'; octx.fillStyle = 'rgba(255,190,40,0.12)';
+  for (const b of leds) circle(b, sx, sy);
+  // đốm đang xác minh - trắng mờ nét đứt
+  octx.strokeStyle = 'rgba(230,230,230,0.7)'; octx.fillStyle = 'rgba(230,230,230,0.06)'; octx.setLineDash([4, 4]);
+  for (const b of pending) circle(b, sx, sy);
+  octx.setLineDash([]);
+  // xác nhận bám góc - đỏ
+  octx.strokeStyle = 'rgba(255,40,40,0.97)'; octx.fillStyle = 'rgba(255,40,40,0.18)';
+  for (const b of confirmed) circle(b, sx, sy);
 }
 
 // BFS gom cụm + lọc gọn/màu + vẽ + báo trạng thái
@@ -211,9 +285,10 @@ async function startScan() {
     const rect = stageEl.getBoundingClientRect();
     overlay.width = rect.width; overlay.height = rect.height;
     stopBtn.disabled = false;
+    flashEl.classList.remove('on');     // màn hình tối; đèn sáng do máy 2 lo
+    tracks = [];
     loop();
-    if (mode === 'ir') { flashEl.classList.remove('on'); await irCountdown(10); }
-    else startStrobe();                 // lens: chớp màn hình để temporal-diff
+    if (mode === 'ir') await irCountdown(10);
     statusEl.textContent = 'Đang quét…';
   } catch (err) {
     statusEl.textContent = '❌ Lỗi camera: ' + err.message;
@@ -245,7 +320,7 @@ function selectMode(m) {
 
 function stopScan() {
   if (raf) cancelAnimationFrame(raf);
-  stopStrobe();
+  flashEl.classList.remove('on'); tracks = [];
   if (diffy) diffy.stop();
   stopBtn.disabled = true;
   statusEl.textContent = 'Đã dừng — tải lại trang để quét lại';

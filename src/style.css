@@ -29,7 +29,8 @@ html, body {
   z-index: 0;
   transition: background 20ms linear;
 }
-#flash.on { background: #ffffff; }
+/* Pha ON: phủ CẢ màn hình trắng (đè lên giao diện) -> xung sáng mạnh rọi vào vật */
+#flash.on { background: #ffffff; z-index: 50; }
 
 #app {
   position: relative;

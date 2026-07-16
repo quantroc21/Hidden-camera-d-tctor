@@ -85,7 +85,24 @@ function detect(video) {
   detectLensSweep(d, lum, sens);
 }
 
-// Phát hiện ống kính bằng độ bám góc khi rê máy
+const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+// Điểm bằng chứng: gộp NHIỀU dấu hiệu của ống kính -> chỉ khoanh khi đủ điểm.
+function evidence(t) {
+  const n = t.n;
+  const cMean = t.sC / n;
+  const cVar = Math.max(0, t.sC2 / n - cMean * cMean), cStd = Math.sqrt(cVar);
+  const fillM = t.sFill / n, aspM = t.sAsp / n, satM = t.sSat / n, szM = t.sSz / n;
+  const persist = clamp01((t.age - 2) / 8);                 // bám góc lâu khi rê
+  const round = clamp01((fillM - 0.4) / 0.55) * clamp01((2.6 - aspM) / 1.6); // tròn & đặc
+  const neutral = clamp01((0.34 - satM) / 0.34);            // trắng/trung tính (không phải LED màu)
+  const steady = clamp01(1 - (cMean > 5 ? cStd / cMean : 1)); // độ sáng ổn định (retro), không chớp loạn
+  const strong = clamp01((cMean - 35) / 90);                // đủ chói hơn nền
+  const small = clamp01((26 - szM) / 22);                   // đốm nhỏ (ống kính), không to
+  return 0.28 * persist + 0.18 * round + 0.14 * neutral + 0.18 * steady + 0.12 * strong + 0.10 * small;
+}
+
+// Phát hiện ống kính: gom đốm -> đo nhiều đặc trưng -> nối track -> chấm điểm bằng chứng
 function detectLensSweep(d, lum, sens) {
   const bg = boxBlur(lum, AW, AH, 6);
   const absFloor = 150, localGap = 110 - sens * 7;
@@ -98,10 +115,10 @@ function detectLensSweep(d, lum, sens) {
     const i0 = y * AW + x;
     if (seen[i0] || !hot(i0)) continue;
     const st = [i0]; seen[i0] = 1;
-    let c = 0, minX = x, maxX = x, minY = y, maxY = y, sR = 0, sG = 0, sB = 0;
+    let c = 0, minX = x, maxX = x, minY = y, maxY = y, sR = 0, sG = 0, sB = 0, sL = 0, sBg = 0;
     while (st.length) {
       const i = st.pop(), cx = i % AW, cy = (i - cx) / AW; c++;
-      const p = i * 4; sR += d[p]; sG += d[p + 1]; sB += d[p + 2];
+      const p = i * 4; sR += d[p]; sG += d[p + 1]; sB += d[p + 2]; sL += lum[i]; sBg += bg[i];
       if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
       if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
@@ -113,39 +130,42 @@ function detectLensSweep(d, lum, sens) {
     }
     const bw = maxX - minX + 1, bh = maxY - minY + 1;
     const fill = c / (bw * bh), aspect = Math.max(bw, bh) / Math.min(bw, bh);
-    const compact = fill >= 0.45 && aspect <= 2.6 && c >= 3;
     const mx = Math.max(sR, sG, sB), mn = Math.min(sR, sG, sB), sat = mx > 0 ? (mx - mn) / mx : 0;
+    const contrast = sL / c - sBg / c;
     const box = { minX, maxX, minY, maxY };
     if (c > maxLensCells) surfaces.push(box);
-    else if (compact) {
-      if (sat >= 0.34) leds.push(box);                                   // LED màu -> thiết bị
-      else cands.push({ cx: (minX + maxX + 1) / 2, cy: (minY + maxY + 1) / 2, box });
+    else if (fill >= 0.45 && aspect <= 2.6 && c >= 3) {
+      if (sat >= 0.5) leds.push(box);       // màu đậm -> chắc chắn LED thiết bị
+      else cands.push({ cx: (minX + maxX + 1) / 2, cy: (minY + maxY + 1) / 2, box, fill, aspect, sat, contrast, size: c });
     }
   }
 
-  matchTracks(cands);                     // nối đốm qua các khung để đo độ bám
-  const CONFIRM = 6;                       // sống >= 6 khung khi rê = bám góc = ống kính
+  matchTracks(cands);
+  const CONF = clamp01(0.72 - sens * 0.03);   // ngưỡng điểm để khoanh đỏ (sens5 -> 0.57)
   const confirmed = [], pending = [];
   for (const t of tracks) {
-    if (t.miss > 0) continue;              // chỉ vẽ đốm đang hiện
-    (t.age >= CONFIRM ? confirmed : pending).push(t.box);
+    if (t.miss > 0) continue;
+    const s = evidence(t);
+    if (s >= CONF && t.age >= 4) confirmed.push(t.box);
+    else if (s >= CONF - 0.18) pending.push(t.box);   // gần đủ điểm -> đang xác minh
+    // điểm thấp -> KHÔNG vẽ (tránh phun chấm loạn)
   }
   drawSweep(confirmed, pending, leds, surfaces);
 
   statusEl.classList.remove('idle', 'ok', 'warn');
   if (confirmed.length > 0) {
-    statusEl.textContent = `🔴 ${confirmed.length} đốm BÁM GÓC — nghi ống kính camera (rê tiếp để chắc)`;
+    statusEl.textContent = `🔴 ${confirmed.length} đốm ĐỦ BẰNG CHỨNG ống kính (rê tiếp cho chắc)`;
     statusEl.classList.add('warn');
   } else if (pending.length > 0) {
-    statusEl.textContent = `⏳ Đang xác minh ${pending.length} đốm — RÊ CHẬM để lọc gương/kim loại`;
+    statusEl.textContent = `⏳ Đang gom bằng chứng ${pending.length} đốm — RÊ CHẬM quanh vật`;
     statusEl.classList.add('idle');
   } else {
-    statusEl.textContent = '✅ Chưa thấy đốm bám góc' + (leds.length ? ` (bỏ ${leds.length} LED màu)` : '');
+    statusEl.textContent = '✅ Chưa đủ bằng chứng ống kính' + (leds.length ? ` (bỏ ${leds.length} LED màu)` : '');
     statusEl.classList.add('ok');
   }
 }
 
-// Bộ nối đốm đơn giản (theo khoảng cách) để đo tuổi thọ mỗi đốm khi rê máy
+// Nối đốm qua các khung + tích lũy thống kê đặc trưng để chấm điểm
 function matchTracks(cands) {
   const R2 = 11 * 11;
   const used = new Array(tracks.length).fill(false);
@@ -160,8 +180,14 @@ function matchTracks(cands) {
       const t = tracks[best]; used[best] = true;
       t.x = (t.x + cd.cx) / 2; t.y = (t.y + cd.cy) / 2;
       t.age++; t.miss = 0; t.box = cd.box;
+      t.n++; t.sC += cd.contrast; t.sC2 += cd.contrast * cd.contrast;
+      t.sFill += cd.fill; t.sAsp += cd.aspect; t.sSat += cd.sat; t.sSz += cd.size;
     } else {
-      tracks.push({ x: cd.cx, y: cd.cy, age: 1, miss: 0, box: cd.box });
+      tracks.push({
+        x: cd.cx, y: cd.cy, age: 1, miss: 0, box: cd.box,
+        n: 1, sC: cd.contrast, sC2: cd.contrast * cd.contrast,
+        sFill: cd.fill, sAsp: cd.aspect, sSat: cd.sat, sSz: cd.size,
+      });
     }
   }
   for (let k = 0; k < tracks.length; k++) if (!used[k]) tracks[k].miss++;

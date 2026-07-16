@@ -36,7 +36,7 @@ const SUB = {
   lens: 'Máy 1 <b>camera trước</b> · máy 2 <b>đèn pin sáng ép sát cạnh camera</b> · tắt đèn phòng · <b>RÊ THẬT CHẬM</b> quanh vật — đốm nào sáng bám theo góc = ống kính (khoanh đỏ)',
   ir: 'Dùng <b>camera trước</b> · <b>tắt HẾT đèn</b>, chờ ~10s cho camera ẩn chuyển quay đêm · tìm chấm sáng tím/trắng mắt thường không thấy',
 };
-const facingFor = () => 'user';
+const facingFor = () => 'environment';
 
 const origGUM = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
 navigator.mediaDevices.getUserMedia = (c) => {

@@ -1,4 +1,6 @@
 import { create } from 'diffyjs';
+import '@tensorflow/tfjs';
+import * as cocoSsd from '@tensorflow-models/coco-ssd';
 
 /*
  * Máy soi camera — demo.
@@ -22,6 +24,7 @@ const sensEl = document.getElementById('sens');
 const subEl = document.getElementById('sub');
 const modeLensBtn = document.getElementById('modeLens');
 const modeIrBtn = document.getElementById('modeIr');
+const modeAiBtn = document.getElementById('modeAi');
 const octx = overlay.getContext('2d');
 
 const acanvas = document.createElement('canvas');
@@ -31,12 +34,15 @@ const actx = acanvas.getContext('2d', { willReadFrequently: true });
 let diffy = null, raf = null, started = false;
 let mode = 'lens';          // 'lens' (soi ống kính) | 'ir' (soi đèn đêm)
 let tracks = [];
+let aiModel = null, aiBusy = false, aiLast = 0;
 
-// Cả 2 mode dùng CAMERA TRƯỚC (máy 1). Máy 2 = đèn pin sáng, ép sát camera.
+// Camera trước (máy 1). Máy 2 = đèn sáng ép sát camera (giữ đèn để ống kính phản xạ).
 const SUB = {
   lens: 'Máy 1 <b>camera trước</b> · máy 2 <b>đèn sáng ép sát cạnh camera</b> · <b>NGHIÊNG / rê CHẬM</b> quanh vật — đốm nhỏ <b>ánh tím/xanh đổi màu</b> (lớp phủ ống kính) = camera (khoanh đỏ)',
   ir: 'Dùng <b>camera trước</b> · <b>tắt HẾT đèn</b>, chờ ~10s cho camera ẩn chuyển quay đêm · tìm chấm sáng tím/trắng mắt thường không thấy',
+  ai: '<b>AI (thử)</b> · giữ <b>đèn sáng</b>, chĩa quanh phòng — AI nhận <b>điện thoại/laptop/TV</b> (vật chứa camera). Cần internet tải model lần đầu.',
 };
+const AI_CLASSES = { 'cell phone': 'điện thoại', laptop: 'laptop', tv: 'màn hình/TV' };
 const facingFor = () => 'environment';
 
 const origGUM = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
@@ -309,14 +315,46 @@ function status(lens, led, max, label) {
 
 function loop() {
   const v = diffy && diffy.video;
-  if (v && v.readyState >= 2 && v.videoWidth) detect(v);
+  if (v && v.readyState >= 2 && v.videoWidth) {
+    if (mode === 'ai') aiTick(v); else detect(v);
+  }
   raf = requestAnimationFrame(loop);
+}
+
+// Mode AI: coco-ssd nhận vật chứa camera (điện thoại/laptop/TV). Chạy giãn cách cho mượt.
+function aiTick(v) {
+  if (!aiModel || aiBusy) return;
+  const now = performance.now();
+  if (now - aiLast < 350) return;
+  aiLast = now; aiBusy = true;
+  aiModel.detect(v).then((preds) => { drawAI(preds, v); aiBusy = false; }).catch(() => { aiBusy = false; });
+}
+
+function drawAI(preds, v) {
+  const W = overlay.width, H = overlay.height;
+  octx.clearRect(0, 0, W, H);
+  const sx = W / v.videoWidth, sy = H / v.videoHeight;
+  octx.lineWidth = 3; octx.font = 'bold 14px sans-serif';
+  let n = 0;
+  for (const p of preds) {
+    if (!(p.class in AI_CLASSES) || p.score < 0.5) continue;
+    n++;
+    const [x, y, bw, bh] = p.bbox;
+    octx.strokeStyle = 'rgba(255,40,40,0.95)'; octx.fillStyle = 'rgba(255,40,40,0.14)';
+    octx.fillRect(x * sx, y * sy, bw * sx, bh * sy);
+    octx.strokeRect(x * sx, y * sy, bw * sx, bh * sy);
+    octx.fillStyle = 'rgba(255,60,60,1)';
+    octx.fillText(`${AI_CLASSES[p.class]} ${Math.round(p.score * 100)}%`, x * sx + 4, y * sy + 16);
+  }
+  statusEl.classList.remove('idle', 'ok', 'warn');
+  if (n > 0) { statusEl.textContent = `🔴 ${n} vật nghi chứa camera (AI)`; statusEl.classList.add('warn'); }
+  else { statusEl.textContent = '✅ AI chưa thấy vật chứa camera'; statusEl.classList.add('ok'); }
 }
 
 async function startScan() {
   if (started) return;
   started = true;
-  startBtn.disabled = true; modeLensBtn.disabled = true; modeIrBtn.disabled = true;
+  startBtn.disabled = true; modeLensBtn.disabled = true; modeIrBtn.disabled = true; modeAiBtn.disabled = true;
   hintEl.style.display = 'none';
   statusEl.textContent = 'Đang mở camera…';
   try {
@@ -332,7 +370,11 @@ async function startScan() {
     tracks = [];
     loop();
     if (mode === 'ir') await irCountdown(10);
-    statusEl.textContent = 'Đang quét…';
+    else if (mode === 'ai') {
+      statusEl.textContent = 'Đang tải model AI… (vài giây, cần internet)';
+      cocoSsd.load().then((m) => { aiModel = m; }).catch((e) => { statusEl.textContent = '❌ Tải model AI lỗi: ' + e.message; });
+    }
+    statusEl.textContent = mode === 'ai' ? statusEl.textContent : 'Đang quét…';
   } catch (err) {
     statusEl.textContent = '❌ Lỗi camera: ' + err.message;
     started = false; startBtn.disabled = false;
@@ -358,6 +400,7 @@ function selectMode(m) {
   mode = m;
   modeLensBtn.classList.toggle('active', m === 'lens');
   modeIrBtn.classList.toggle('active', m === 'ir');
+  modeAiBtn.classList.toggle('active', m === 'ai');
   subEl.innerHTML = SUB[m];
 }
 
@@ -374,6 +417,7 @@ startBtn.addEventListener('click', startScan);
 stopBtn.addEventListener('click', stopScan);
 modeLensBtn.addEventListener('click', () => selectMode('lens'));
 modeIrBtn.addEventListener('click', () => selectMode('ir'));
+modeAiBtn.addEventListener('click', () => selectMode('ai'));
 window.addEventListener('resize', () => {
   if (!started) return;
   const rect = stageEl.getBoundingClientRect();
